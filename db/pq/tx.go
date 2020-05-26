@@ -2,6 +2,8 @@ package pq
 
 import (
 	"database/sql"
+
+	"github.com/golang/glog"
 )
 
 // Transaction ...
@@ -62,6 +64,34 @@ func (b *Transaction) Commit() (err error) {
 	// commit
 	err = b.tx.Commit()
 	if err != nil {
+		return
+	}
+
+	return
+}
+
+// WithTransaction ...
+func WithTransaction(db *sql.DB, queries func(tx *sql.Tx) error) (err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+			return
+		}
+		if err = tx.Commit(); err != nil {
+			glog.Error(err)
+			tx.Rollback()
+			return
+		}
+	}()
+
+	err = queries(tx)
+	if err != nil {
+		glog.Error(err)
 		return
 	}
 
