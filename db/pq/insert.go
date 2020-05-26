@@ -56,6 +56,12 @@ func BatchInsertTransaction(tx *sql.Tx, table string, records []Record, opt Inse
 	}
 	rec := records[0]
 	cols := MapColumn(rec)
+	if len(cols) == 0 {
+		err = fmt.Errorf("missing columns")
+		glog.Error(err)
+		return
+	}
+
 	batchSize := PlaceholderLimit / len(cols)
 	numBatch := len(records) / batchSize
 	if len(records)%batchSize > 0 {
