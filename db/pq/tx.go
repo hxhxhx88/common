@@ -71,14 +71,16 @@ func (b *Transaction) Commit() (err error) {
 }
 
 // WithTransaction ...
-func WithTransaction(db *sql.DB, queries func(tx *sql.Tx) error) (err error) {
+func WithTransaction(db *sql.DB, queries func(tx *sql.Tx) (bool, error)) (err error) {
+	var abort bool
+
 	tx, err := db.Begin()
 	if err != nil {
 		glog.Error(err)
 		return
 	}
 	defer func() {
-		if err != nil {
+		if err != nil || abort {
 			tx.Rollback()
 			return
 		}
@@ -89,7 +91,7 @@ func WithTransaction(db *sql.DB, queries func(tx *sql.Tx) error) (err error) {
 		}
 	}()
 
-	err = queries(tx)
+	abort, err = queries(tx)
 	if err != nil {
 		glog.Error(err)
 		return

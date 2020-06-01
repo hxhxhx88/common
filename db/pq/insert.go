@@ -21,9 +21,17 @@ type Column struct {
 	Name  ColumnName
 }
 
+// InsertInformation ...
+type InsertInformation struct {
+	BatchCount int
+}
+
 // InsertOption ...
 type InsertOption struct {
-	OnConflictDoNothing bool
+	Abort                *bool
+	OnConflictDoNothing  bool
+	BeforeInsertCallback func(info InsertInformation)
+	BatchCallback        func(batchIndex int)
 
 	// Key is the field of inserting table.
 	// Value is the field of reference table.
@@ -38,8 +46,11 @@ func BatchInsert(db *sql.DB, table TableName, records []Record) (ids []int, err 
 
 // BatchInsertWithOption ...
 func BatchInsertWithOption(db *sql.DB, table TableName, records []Record, opt InsertOption) (ids []int, err error) {
-	err = WithTransaction(db, func(tx *sql.Tx) (err error) {
+	err = WithTransaction(db, func(tx *sql.Tx) (abort bool, err error) {
 		ids, err = BatchInsertTransaction(tx, table, records, opt)
+		if opt.Abort != nil {
+			abort = *opt.Abort
+		}
 		return
 	})
 	if err != nil {
@@ -71,7 +82,19 @@ func BatchInsertTransaction(tx *sql.Tx, table TableName, records []Record, opt I
 		numBatch++
 	}
 
+	if opt.BeforeInsertCallback != nil {
+		info := InsertInformation{
+			BatchCount: numBatch,
+		}
+		opt.BeforeInsertCallback(info)
+	}
+
 	for bidx := 0; bidx < numBatch; bidx++ {
+		if opt.Abort != nil && *opt.Abort {
+			glog.Infof("inserting aborted")
+			break
+		}
+
 		glog.Infof("inserting batch %v/%v", bidx+1, numBatch)
 
 		m := bidx * batchSize
@@ -88,6 +111,10 @@ func BatchInsertTransaction(tx *sql.Tx, table TableName, records []Record, opt I
 			return
 		}
 		ids = append(ids, currIDs...)
+
+		if opt.BatchCallback != nil {
+			opt.BatchCallback(bidx)
+		}
 	}
 
 	return
