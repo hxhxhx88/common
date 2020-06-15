@@ -68,15 +68,25 @@ func BatchInsertTransaction(tx *sql.Tx, table TableName, records []Record, opt I
 	if len(records) == 0 {
 		return
 	}
-	rec := records[0]
-	cols := MapColumn(rec)
-	if len(cols) == 0 {
+
+	colSet := make(map[string]bool)
+	for _, rec := range records {
+		cols := MapColumn(rec)
+		for col := range cols {
+			colSet[col] = true
+		}
+	}
+	if len(colSet) == 0 {
 		err = fmt.Errorf("missing columns")
 		glog.Error(err)
 		return
 	}
+	var columns []string
+	for col := range colSet {
+		columns = append(columns, col)
+	}
 
-	batchSize := PlaceholderLimit / len(cols)
+	batchSize := PlaceholderLimit / len(columns)
 	numBatch := len(records) / batchSize
 	if len(records)%batchSize > 0 {
 		numBatch++
@@ -104,7 +114,7 @@ func BatchInsertTransaction(tx *sql.Tx, table TableName, records []Record, opt I
 		}
 		recs := records[m:n]
 
-		currIDs, e := insertBatch(tx, table, recs, opt)
+		currIDs, e := insertBatch(tx, table, recs, columns, opt)
 		if e != nil {
 			err = e
 			glog.Error(err)
@@ -120,8 +130,8 @@ func BatchInsertTransaction(tx *sql.Tx, table TableName, records []Record, opt I
 	return
 }
 
-func insertBatch(tx *sql.Tx, table TableName, records []Record, opt InsertOption) (ids []int, err error) {
-	query, args, empty, err := MakeBatchInsertQuery(table, records, opt)
+func insertBatch(tx *sql.Tx, table TableName, records []Record, columns []string, opt InsertOption) (ids []int, err error) {
+	query, args, empty, err := MakeBatchInsertQuery(table, records, columns, opt)
 	if err != nil {
 		glog.Error(err)
 		return
@@ -151,8 +161,13 @@ func insertBatch(tx *sql.Tx, table TableName, records []Record, opt InsertOption
 }
 
 // MakeBatchInsertQuery ...
-func MakeBatchInsertQuery(table TableName, records []Record, opt InsertOption) (query string, args []interface{}, empty bool, err error) {
-	var fields []string
+func MakeBatchInsertQuery(table TableName, records []Record, columns []string, opt InsertOption) (query string, args []interface{}, empty bool, err error) {
+	if len(columns) == 0 {
+		err = fmt.Errorf("empty inserting fields")
+		glog.Error(err)
+		return
+	}
+
 	var values []map[string]interface{}
 	for _, rec := range records {
 		cols := MapColumn(rec)
@@ -163,17 +178,6 @@ func MakeBatchInsertQuery(table TableName, records []Record, opt InsertOption) (
 		return
 	}
 
-	// use the first record as reference to determine the order of fields
-	ref := values[0]
-	for f := range ref {
-		fields = append(fields, f)
-	}
-	if len(fields) == 0 {
-		err = fmt.Errorf("empty inserting fields")
-		glog.Error(err)
-		return
-	}
-
 	// will use different way to handle foreign key case
 	hasForeignKey := len(opt.ForeignKeys) > 0
 
@@ -181,7 +185,7 @@ func MakeBatchInsertQuery(table TableName, records []Record, opt InsertOption) (
 	var rows []string
 	for _, vs := range values {
 		var phds []string
-		for _, f := range fields {
+		for _, f := range columns {
 			v := vs[f]
 
 			var suffix string
@@ -213,7 +217,7 @@ func MakeBatchInsertQuery(table TableName, records []Record, opt InsertOption) (
 		// if no foreign key is provided, things are easy.
 		query = fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s %s RETURNING id`,
 			table,
-			strings.Join(fields, ","),
+			strings.Join(columns, ","),
 			strings.Join(rows, ","),
 			onConflict,
 		)
@@ -232,7 +236,7 @@ func MakeBatchInsertQuery(table TableName, records []Record, opt InsertOption) (
 		)`, ref.Table, ref.Name, field)
 		existClauses = append(existClauses, clause)
 	}
-	fieldStr := strings.Join(fields, ",")
+	fieldStr := strings.Join(columns, ",")
 
 	query = fmt.Sprintf(`
 	INSERT INTO %s
