@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/lib/pq"
 )
 
 // TableName ...
@@ -29,24 +30,29 @@ type InsertInformation struct {
 // InsertOption ...
 type InsertOption struct {
 	Abort                *bool
-	OnConflictDoNothing  bool
+	OnConflict           string
 	BeforeInsertCallback func(info InsertInformation)
 	BatchCallback        func(batchIndex int)
+	NoID                 bool
 
 	// Key is the field of inserting table.
 	// Value is the field of reference table.
 	// If provided, checks are performed before inserting.
 	ForeignKeys map[ColumnName]Column
+
+	// Columns whose value is empty should also be inserted instead of omitted.
+	// For example, for an NOT-NULL integer column whose being 0 is perfect valid, we should add it to this option.
+	KeepEmptyValueColums []ColumnName
 }
 
 // BatchInsert ...
-func BatchInsert(db *sql.DB, table TableName, records []Record) (ids []int, err error) {
-	return BatchInsertWithOption(db, table, records, InsertOption{})
+func BatchInsert(dbase *sql.DB, table TableName, records []Record) (ids []int, err error) {
+	return BatchInsertWithOption(dbase, table, records, InsertOption{})
 }
 
 // BatchInsertWithOption ...
-func BatchInsertWithOption(db *sql.DB, table TableName, records []Record, opt InsertOption) (ids []int, err error) {
-	err = WithTransaction(db, func(tx *sql.Tx) (abort bool, err error) {
+func BatchInsertWithOption(dbase *sql.DB, table TableName, records []Record, opt InsertOption) (ids []int, err error) {
+	err = WithTransaction(dbase, func(tx *sql.Tx) (abort bool, err error) {
 		ids, err = BatchInsertTransaction(tx, table, records, opt)
 		if opt.Abort != nil {
 			abort = *opt.Abort
@@ -71,7 +77,7 @@ func BatchInsertTransaction(tx *sql.Tx, table TableName, records []Record, opt I
 
 	colSet := make(map[string]bool)
 	for _, rec := range records {
-		cols := MapColumn(rec)
+		cols := mapColumn(rec, opt)
 		for col := range cols {
 			colSet[col] = true
 		}
@@ -141,6 +147,15 @@ func insertBatch(tx *sql.Tx, table TableName, records []Record, columns []string
 	}
 
 	// exec
+	if opt.NoID {
+		_, err = tx.Exec(query, args...)
+		if err != nil {
+			glog.Error(err)
+			return
+		}
+		return
+	}
+
 	rows, err := tx.Query(query, args...)
 	if err != nil {
 		glog.Error(err)
@@ -170,7 +185,7 @@ func MakeBatchInsertQuery(table TableName, records []Record, columns []string, o
 
 	var values []map[string]interface{}
 	for _, rec := range records {
-		cols := MapColumn(rec)
+		cols := mapColumn(rec, opt)
 		values = append(values, cols)
 	}
 	if len(values) == 0 {
@@ -206,20 +221,22 @@ func MakeBatchInsertQuery(table TableName, records []Record, columns []string, o
 		row := "(" + strings.Join(phds, ",") + ")"
 		rows = append(rows, row)
 	}
+	onConflict := " " + opt.OnConflict + " "
 
-	onConflict := ""
-	if opt.OnConflictDoNothing {
-		onConflict = " ON CONFLICT DO NOTHING "
+	returning := "RETURNING id"
+	if opt.NoID {
+		returning = ""
 	}
 
 	// make sql
 	if len(opt.ForeignKeys) == 0 {
 		// if no foreign key is provided, things are easy.
-		query = fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s %s RETURNING id`,
+		query = fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s %s %s`,
 			table,
 			strings.Join(columns, ","),
 			strings.Join(rows, ","),
 			onConflict,
+			returning,
 		)
 		return
 	}
@@ -248,14 +265,33 @@ func MakeBatchInsertQuery(table TableName, records []Record, columns []string, o
 	) AS vs(%s)
 	WHERE %s
 	%s
-	RETURNING id`,
+	%s`,
 		table,
 		fieldStr,
 		strings.Join(rows, ","),
 		fieldStr,
 		strings.Join(existClauses, " AND "),
 		onConflict,
+		returning,
 	)
 
 	return
+}
+
+func mapColumn(r Record, opt InsertOption) map[string]interface{} {
+	var keepEmptyValueCols []string
+	for _, c := range opt.KeepEmptyValueColums {
+		keepEmptyValueCols = append(keepEmptyValueCols, string(c))
+	}
+
+	return MapColumnWithOption(r, MapColumnOption{
+		WrapArray: func(a interface{}) interface{} {
+			if _, ok := a.([]byte); ok {
+				// `[]byte` corresponds to `bytea` in PostgreSQL and we should do nothing
+				return a
+			}
+			return pq.Array(a)
+		},
+		KeepEmptyValueColums: keepEmptyValueCols,
+	})
 }
