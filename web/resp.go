@@ -5,9 +5,9 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/golang/glog"
 	"github.com/golang/protobuf/jsonpb"
+	"github.com/golang/protobuf/proto"
 )
 
 // OK ...
